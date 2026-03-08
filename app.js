@@ -152,11 +152,39 @@ function createFooter(includeByline = false) {
     if (includeByline) {
         html += `<p class="text-gold mb-1" style="font-family: var(--font-heading); letter-spacing: 2px;">by I_Mortekai</p>`;
     }
-    html += `<p class="text-muted text-sm pb-1">v1.0 &bull; build 001 &bull; 2026-03-08</p>`;
+
+    html += `
+        <p class="text-muted text-sm pb-1 mb-0">v1.0 &bull; build 001 &bull; 2026-03-08</p>
+        <button class="btn text-muted text-sm" onclick="checkForUpdates()" style="background: transparent; text-decoration: underline; padding: 4px; border: none; font-weight: normal;">Check for Updates</button>
+    `;
 
     footer.innerHTML = html;
     return footer;
 }
+
+window.checkForUpdates = async function () {
+    if (confirm("Check for updates? This will refresh the app and load the latest version without losing your saved data.")) {
+        try {
+            // 1. Clear all service worker caches
+            if ('caches' in window) {
+                const cacheNames = await caches.keys();
+                await Promise.all(cacheNames.map(name => caches.delete(name)));
+            }
+            // 2. Unregister ALL service workers
+            if ('serviceWorker' in navigator) {
+                const registrations = await navigator.serviceWorker.getRegistrations();
+                for (let registration of registrations) {
+                    await registration.unregister();
+                }
+            }
+            // 3. Force reload to fetch fresh assets
+            window.location.reload(true);
+        } catch (err) {
+            console.error("Update failed", err);
+            alert("Failed to update. Please refresh manually.");
+        }
+    }
+};
 
 function showHowToPlayModal() {
     // Remove if exists
