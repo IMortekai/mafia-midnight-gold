@@ -10,6 +10,7 @@ const ROLES = {
 };
 
 const PHASES = {
+    INTRO: 'INTRO',
     SETUP: 'SETUP',
     ASSIGNMENT: 'ASSIGNMENT',
     GAMEPLAY: 'GAMEPLAY',
@@ -18,7 +19,9 @@ const PHASES = {
 
 // Default State Blueprint
 const defaultState = {
+    lastActive: Date.now(),
     players: [], // { id, name, originalRole, currentRole, isActive, eliminationType, effects: [] }
+    savedGroups: {}, // { [groupName]: { players: [], settings: {} } }
     settings: {
         ladyEnabled: false,
         jokerEnabled: false
@@ -58,9 +61,53 @@ function loadState() {
     if (!appState.scoreboard) {
         appState.scoreboard = { Town: 0, Mafia: 0, Joker: 0 };
     }
+
+    // Ensure savedGroups exists
+    if (!appState.savedGroups) {
+        appState.savedGroups = {};
+    }
+
+    // 24-Hour Session Reset Check (24 * 60 * 60 * 1000 = 86400000ms)
+    // If it's been >24 hours and we are NOT in INTRO phase, reset the active session
+    // but KEEP the players and saved groups.
+    const TIME_24_HOURS = 86400000;
+    const now = Date.now();
+    if (appState.lastActive && (now - appState.lastActive > TIME_24_HOURS)) {
+        console.log("24 hours of inactivity detected. Resetting session to INTRO.");
+
+        // Soft reset
+        appState.gameState = {
+            phase: PHASES.INTRO,
+            cycle: 1,
+            currentStep: 0,
+            history: [],
+            publicSummary: [],
+            turnActions: { mafiaTargetId: null, ladyTargetId: null, doctorTargetId: null },
+            winner: null
+        };
+        appState.gameState._scoreRecorded = false;
+
+        appState.players.forEach(p => {
+            p.currentRole = null;
+            p.originalRole = null;
+            p.isActive = true;
+            p.eliminationType = null;
+            p.effects = [];
+        });
+    }
+
+    // Always start at INTRO if we open the app freshly (or refresh) and we aren't mid-game
+    // To make sure intro always shows once when loaded
+    if (appState.gameState.phase === PHASES.SETUP || appState.gameState.phase === PHASES.INTRO) {
+        appState.gameState.phase = PHASES.INTRO;
+    }
+
+    appState.lastActive = Date.now();
+    saveState();
 }
 
 function saveState() {
+    appState.lastActive = Date.now();
     localStorage.setItem('mafiaState', JSON.stringify(appState));
 }
 
@@ -76,6 +123,9 @@ function renderView() {
     appEl.innerHTML = ''; // Clear current view
 
     switch (appState.gameState.phase) {
+        case PHASES.INTRO:
+            appEl.appendChild(createIntroView());
+            break;
         case PHASES.SETUP:
             appEl.appendChild(createSetupView());
             break;
@@ -89,18 +139,203 @@ function renderView() {
             appEl.appendChild(createEndView());
             break;
         default:
-            appEl.appendChild(createSetupView());
+            appEl.appendChild(createIntroView());
     }
 }
 
+// --- Common UI Widgets --- //
+function createFooter(includeByline = false) {
+    const footer = document.createElement('div');
+    footer.className = 'app-footer text-center mt-2 w-100';
+
+    let html = '';
+    if (includeByline) {
+        html += `<p class="text-gold mb-1" style="font-family: var(--font-heading); letter-spacing: 2px;">by I_Mortekai</p>`;
+    }
+    html += `<p class="text-muted text-sm pb-1">v1.0 &bull; build 001 &bull; 2026-03-08</p>`;
+
+    footer.innerHTML = html;
+    return footer;
+}
+
+function showHowToPlayModal() {
+    // Remove if exists
+    const existing = document.getElementById('howToPlayModal');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'howToPlayModal';
+    overlay.className = 'modal-overlay fade-in';
+
+    // Clicking outside modal body closes it
+    overlay.onclick = (e) => {
+        if (e.target === overlay) overlay.remove();
+    };
+
+    const modalBox = document.createElement('div');
+    modalBox.className = 'modal-box panel';
+
+    modalBox.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--clr-gold-muted); padding-bottom: 12px; margin-bottom: 16px;">
+            <h2 class="text-gold" style="margin: 0;">MIDNIGHT MAFIA</h2>
+            <button class="btn-icon text-muted" onclick="document.getElementById('howToPlayModal').remove()">✕</button>
+        </div>
+        <div class="modal-body text-sm" style="color: #e0e0e0; line-height: 1.6;">
+            <p class="mb-1">Midnight Mafia is a live social deduction game played by a group of people and one narrator. Each player is secretly assigned a role. Some roles have special actions during the night, while others mainly participate through discussion and voting during the day phase.</p>
+            <p class="mb-1">The goal of the game depends on your role:</p>
+            <ul style="padding-left: 20px;" class="mb-2">
+                <li><strong>Mafia</strong> tries to survive and eliminate the others.</li>
+                <li><strong>Town</strong> tries to figure out who Mafia and Lady are and vote them out.</li>
+                <li><strong>Joker</strong> tries to get voted out by the group.</li>
+            </ul>
+
+            <h3 class="text-gold mb-1">BASIC FLOW OF THE GAME</h3>
+            <p class="mb-1">The game is played in repeating cycles:<br>1. Night phase<br>2. Voting phase</p>
+            <p class="mb-1">During the night phase, players close their eyes and only the currently active role opens their eyes when the narrator calls them.</p>
+            <p class="mb-2">During the voting phase, everyone discusses, accuses, defends themselves, and may vote a player out.</p>
+
+            <h3 class="text-gold mb-1">ROLES</h3>
+            
+            <h4 class="text-danger mb-0 mt-2">MAFIA</h4>
+            <ul style="padding-left: 20px;" class="mb-1">
+                <li>Mafia chooses one player to kill each night.</li>
+                <li>Mafia cannot target themselves.</li>
+                <li>Mafia cannot target Lady.</li>
+                <li>Mafia wins together with Lady if they outlast the town.</li>
+            </ul>
+
+            <h4 class="text-danger mb-0 mt-2">LADY</h4>
+            <ul style="padding-left: 20px;" class="mb-1">
+                <li>Lady is on Mafia’s side.</li>
+                <li>Lady chooses one player to shush each night.</li>
+                <li>A shushed player cannot speak and cannot vote during the next voting phase.</li>
+                <li>Lady can shush any alive player, including Mafia.</li>
+                <li>Lady can shush the same person multiple times across cycles.</li>
+                <li>If Mafia is voted out while Lady is still active, Lady becomes the new Mafia.</li>
+                <li>After becoming the new Mafia, Lady loses the shush ability and starts killing instead.</li>
+            </ul>
+
+            <h4 class="text-info mb-0 mt-2" style="color: #63b3ed;">POLICEMAN</h4>
+            <ul style="padding-left: 20px;" class="mb-1">
+                <li>Policeman checks one player each night.</li>
+                <li>The narrator confirms only whether that chosen player is Mafia or not Mafia.</li>
+                <li>Policeman does not learn any other role.</li>
+            </ul>
+
+            <h4 class="text-info mb-0 mt-2" style="color: #63b3ed;">DOCTOR</h4>
+            <ul style="padding-left: 20px;" class="mb-1">
+                <li>Doctor protects one player each night.</li>
+                <li>If Mafia tries to kill the protected player, the kill fails and there is an attempted murder.</li>
+                <li>Doctor can protect themselves, but not two nights in a row.</li>
+            </ul>
+
+            <h4 class="text-warning mb-0 mt-2" style="color: #fbd38d;">JOKER</h4>
+            <ul style="padding-left: 20px;" class="mb-1">
+                <li>Joker has no active night ability.</li>
+                <li>Joker wins only if the group votes Joker out during the voting phase.</li>
+                <li>If Joker is killed at night, Joker does not win.</li>
+            </ul>
+
+            <h4 class="text-muted mb-0 mt-2">CITIZEN</h4>
+            <ul style="padding-left: 20px;" class="mb-2">
+                <li>Citizen has no special night action.</li>
+                <li>Citizens help the town by discussing, observing behavior, and voting.</li>
+            </ul>
+
+            <h3 class="text-gold mb-1">NIGHT PHASE RULES</h3>
+            <p class="mb-1">The narrator guides the roles in order:</p>
+            <ol style="padding-left: 24px;" class="mb-2">
+                <li>Mafia wakes up and selects a target.</li>
+                <li>Lady wakes up and selects a player to shush.</li>
+                <li>Policeman wakes up and checks one player.</li>
+                <li>Doctor wakes up and protects one player.</li>
+                <li>Joker step is only a reminder and has no action.</li>
+            </ol>
+            <p class="mb-2">After all actions are complete, the narrator announces the result of the night.</p>
+
+            <h3 class="text-gold mb-1">DAY / VOTING PHASE RULES</h3>
+            <p class="mb-1">During the voting phase:</p>
+            <ul style="padding-left: 20px;" class="mb-2">
+                <li>Players discuss who they suspect.</li>
+                <li>Players may accuse, defend, lie, or bluff.</li>
+                <li>A shushed player cannot speak and cannot vote.</li>
+                <li>The group may vote one player out or skip voting.</li>
+            </ul>
+
+            <h3 class="text-gold mb-1">WIN CONDITIONS</h3>
+            <h4 class="mt-2 text-gold">TOWN WINS</h4>
+            <p class="mb-1">- Town wins only when BOTH Mafia and Lady are voted out.</p>
+
+            <h4 class="mt-2 text-danger">MAFIA SIDE WINS</h4>
+            <p class="mb-1">- Mafia side wins when only one non-Mafia/Lady player remains alive.</p>
+
+            <h4 class="mt-2 text-warning" style="color: #fbd38d;">JOKER WINS</h4>
+            <p class="mb-2">- Joker wins immediately if Joker is voted out.</p>
+
+            <h3 class="text-gold mb-1">IMPORTANT NOTES</h3>
+            <ul style="padding-left: 20px;" class="mb-2">
+                <li>Roles are secret during the game.</li>
+                <li>Dead or voted-out players are inactive and no longer participate.</li>
+                <li>The narrator always follows the app prompts to guide the game.</li>
+                <li>This version of Midnight Mafia uses custom house rules, so follow the in-app rules exactly.</li>
+            </ul>
+            <p class="text-center text-gold" style="font-style: italic; margin-top: 24px; margin-bottom: 24px;">Have fun, bluff well, and don’t trust anyone.</p>
+        </div>
+        <button class="btn btn-primary w-100" onclick="document.getElementById('howToPlayModal').remove()">Close</button>
+    `;
+
+    overlay.appendChild(modalBox);
+    document.body.appendChild(overlay);
+}
+
 // --- View Scaffolding --- //
+function createIntroView() {
+    const div = document.createElement('div');
+    div.className = 'view intro-view flex-center';
+
+    const titleContainer = document.createElement('div');
+    titleContainer.className = 'intro-title-container text-center';
+
+    const title = document.createElement('h1');
+    title.className = 'intro-title fade-in-slow';
+    title.innerHTML = `Midnight<br>Mafia`;
+
+    const byline = document.createElement('p');
+    byline.className = 'intro-byline text-muted type-writer';
+    byline.innerText = 'by I_Mortekai';
+
+    titleContainer.appendChild(title);
+    titleContainer.appendChild(byline);
+    div.appendChild(titleContainer);
+
+    const btnContainer = document.createElement('div');
+    btnContainer.className = 'intro-btn-container delay-fade-in';
+
+    const startBtn = document.createElement('button');
+    startBtn.className = 'btn btn-primary';
+    startBtn.innerText = 'Continue';
+    startBtn.onclick = () => {
+        appState.gameState.phase = PHASES.SETUP;
+        saveState();
+        renderView();
+    };
+
+    btnContainer.appendChild(startBtn);
+    div.appendChild(btnContainer);
+
+    div.appendChild(createFooter(false));
+
+    return div;
+}
+
 function createSetupView() {
     const div = document.createElement('div');
     div.className = 'view setup-view';
 
     // Header
-    const header = document.createElement('h2');
-    header.innerText = 'Midnight Setup';
+    const header = document.createElement('h1');
+    header.innerText = 'Midnight Mafia';
+    header.className = 'text-center mb-1';
     div.appendChild(header);
 
     // Player Input
@@ -165,6 +400,112 @@ function createSetupView() {
         });
     }
     div.appendChild(playerList);
+
+    // Saved Groups Actions
+    const groupActions = document.createElement('div');
+    groupActions.className = 'group-actions panel';
+
+    // Top row: Clear All & Save Group
+    const topRow = document.createElement('div');
+    topRow.style.display = 'flex';
+    topRow.style.gap = '10px';
+    topRow.style.marginBottom = '12px';
+
+    const clearBtn = document.createElement('button');
+    clearBtn.className = 'btn btn-secondary';
+    clearBtn.style.flex = 1;
+    clearBtn.style.color = 'var(--clr-danger-light)';
+    clearBtn.style.borderColor = 'var(--clr-danger-light)';
+    clearBtn.innerText = 'Clear All';
+    clearBtn.onclick = () => {
+        if (appState.players.length === 0) return;
+        if (confirm('Are you sure you want to clear all players?')) {
+            appState.players = [];
+            saveState();
+            renderView();
+        }
+    };
+
+    const saveGrpBtn = document.createElement('button');
+    saveGrpBtn.className = 'btn btn-secondary';
+    saveGrpBtn.style.flex = 1;
+    saveGrpBtn.innerText = 'Save Group';
+    saveGrpBtn.onclick = () => {
+        if (appState.players.length === 0) {
+            alert('Add players first before saving a group.');
+            return;
+        }
+        const name = prompt('Enter a name for this group:');
+        if (name && name.trim() !== '') {
+            if (!appState.savedGroups) appState.savedGroups = {};
+            appState.savedGroups[name.trim()] = {
+                players: JSON.parse(JSON.stringify(appState.players)),
+                settings: JSON.parse(JSON.stringify(appState.settings))
+            };
+            saveState();
+            renderView();
+        }
+    };
+
+    topRow.appendChild(clearBtn);
+    topRow.appendChild(saveGrpBtn);
+    groupActions.appendChild(topRow);
+
+    // Bottom row: Load Group
+    const botRow = document.createElement('div');
+    botRow.style.display = 'flex';
+    botRow.style.gap = '10px';
+
+    const groupSelect = document.createElement('select');
+    groupSelect.className = 'input-field';
+    groupSelect.style.flex = 2;
+    groupSelect.style.margin = '0';
+    groupSelect.style.padding = '8px';
+
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.innerText = '-- Select saved group --';
+    groupSelect.appendChild(defaultOpt);
+
+    const savedKeys = Object.keys(appState.savedGroups || {});
+    savedKeys.forEach(k => {
+        const opt = document.createElement('option');
+        opt.value = k;
+        opt.innerText = k;
+        groupSelect.appendChild(opt);
+    });
+
+    const loadGrpBtn = document.createElement('button');
+    loadGrpBtn.className = 'btn btn-secondary';
+    loadGrpBtn.style.flex = 1;
+    loadGrpBtn.innerText = 'Load';
+    loadGrpBtn.onclick = () => {
+        const selected = groupSelect.value;
+        if (selected && appState.savedGroups[selected]) {
+            if (confirm(`Load group "${selected}"? This will replace your current roster.`)) {
+                const groupData = appState.savedGroups[selected];
+                appState.players = JSON.parse(JSON.stringify(groupData.players));
+                if (groupData.settings) {
+                    appState.settings = JSON.parse(JSON.stringify(groupData.settings));
+                }
+                saveState();
+                renderView();
+            }
+        } else {
+            alert('Please select a saved group first.');
+        }
+    };
+
+    if (savedKeys.length === 0) {
+        groupSelect.disabled = true;
+        loadGrpBtn.disabled = true;
+    }
+
+    botRow.appendChild(groupSelect);
+    botRow.appendChild(loadGrpBtn);
+    groupActions.appendChild(botRow);
+
+    div.appendChild(groupActions);
 
     // Role Toggles
     const togglesContainer = document.createElement('div');
@@ -234,7 +575,7 @@ function createSetupView() {
 
     // Start Session Button
     const startBtn = document.createElement('button');
-    startBtn.className = 'btn btn-primary';
+    startBtn.className = 'btn btn-primary w-100 mt-2 mb-1';
     startBtn.innerText = 'Start Game';
 
     // Validation
@@ -248,6 +589,16 @@ function createSetupView() {
     };
 
     div.appendChild(startBtn);
+
+    // How to Play button
+    const howToPlayBtn = document.createElement('button');
+    howToPlayBtn.className = 'btn btn-secondary w-100 mb-2';
+    howToPlayBtn.innerText = 'How to Play';
+    howToPlayBtn.onclick = showHowToPlayModal;
+    div.appendChild(howToPlayBtn);
+
+    // Footer with byline
+    div.appendChild(createFooter(true));
 
     return div;
 }
